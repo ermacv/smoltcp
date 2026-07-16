@@ -517,6 +517,10 @@ pub struct Socket<'a> {
     /// The number of packets received directly after
     /// each other which have the same ACK number.
     local_rx_dup_acks: u8,
+    /// End of the first hole reported by SACK during fast recovery.
+    fast_retransmit_gap_end: Option<TcpSeqNumber>,
+    /// High-water mark to resume at after retransmitting the SACK hole.
+    fast_retransmit_resume: TcpSeqNumber,
 
     /// Duration for Delayed ACK. If None no ACKs will be delayed.
     ack_delay: Option<Duration>,
@@ -598,6 +602,8 @@ impl<'a> Socket<'a> {
             local_rx_last_ack: None,
             local_rx_last_seq: None,
             local_rx_dup_acks: 0,
+            fast_retransmit_gap_end: None,
+            fast_retransmit_resume: TcpSeqNumber::default(),
             ack_delay: Some(ACK_DELAY_DEFAULT),
             ack_delay_timer: AckDelayTimer::Idle,
             challenge_ack_timer: Instant::from_secs(0),
@@ -908,6 +914,8 @@ impl<'a> Socket<'a> {
         self.remote_win_shift = rx_cap_log2.saturating_sub(16) as u8;
         self.remote_mss = DEFAULT_MSS;
         self.remote_last_ts = None;
+        self.fast_retransmit_gap_end = None;
+        self.fast_retransmit_resume = TcpSeqNumber::default();
         self.ack_delay_timer = AckDelayTimer::Idle;
         self.challenge_ack_timer = Instant::from_secs(0);
 
@@ -2045,7 +2053,8 @@ impl<'a> Socket<'a> {
                     if repr.payload.is_empty()
                         && last_rx_ack == ack_number
                         && ack_number < self.remote_last_seq
-                        && !is_window_update =>
+                        && (!is_window_update
+                            || repr.sack_ranges.iter().any(Option::is_some)) =>
                 {
                     // Increment duplicate ACK count
                     self.local_rx_dup_acks = self.local_rx_dup_acks.saturating_add(1);
@@ -2067,6 +2076,22 @@ impl<'a> Socket<'a> {
                     );
 
                     if self.local_rx_dup_acks == 3 {
+                        // The cumulative ACK points at the first missing byte.
+                        // If SACK reports a block after it, retransmit only the
+                        // hole preceding that block instead of rewinding and
+                        // resending the entire in-flight window.
+                        self.fast_retransmit_gap_end = repr
+                            .sack_ranges
+                            .iter()
+                            .flatten()
+                            .map(|(left, _)| TcpSeqNumber(*left as i32))
+                            .filter(|left| *left > ack_number)
+                            .min_by(|left, right| {
+                                let left_offset = *left - ack_number;
+                                let right_offset = *right - ack_number;
+                                left_offset.cmp(&right_offset)
+                            });
+                        self.fast_retransmit_resume = self.remote_last_seq;
                         self.timer.set_for_fast_retransmit();
                         net_debug!("started fast retransmit");
                     }
@@ -2083,6 +2108,9 @@ impl<'a> Socket<'a> {
             // We've processed everything in the incoming segment, so advance the local
             // sequence number past it.
             self.local_seq_no = ack_number;
+            if ack_len > 0 {
+                self.fast_retransmit_gap_end = None;
+            }
             // During retransmission, if an earlier segment got lost but later was
             // successfully received, self.local_seq_no can move past self.remote_last_seq.
             // Do not attempt to retransmit the latter segments; not only this is pointless
@@ -2399,6 +2427,12 @@ impl<'a> Socket<'a> {
             // to be sent again.
             self.remote_last_seq = self.local_seq_no;
 
+            // RTO recovery has no current SACK evidence and deliberately
+            // retains the conservative go-back-N behavior.
+            if !matches!(self.timer, Timer::FastRetransmit) {
+                self.fast_retransmit_gap_end = None;
+            }
+
             // Clear the `should_retransmit` state. If we can't retransmit right
             // now for whatever reason (like zero window), this avoids an
             // infinite polling loop where `poll_at` returns `Now` but `dispatch`
@@ -2648,6 +2682,14 @@ impl<'a> Socket<'a> {
 
         // We've sent a packet successfully, so we can update the internal state now.
         self.remote_last_seq = repr.seq_number + repr.segment_len();
+        if let Some(gap_end) = self.fast_retransmit_gap_end
+            && self.remote_last_seq >= gap_end
+        {
+            if self.fast_retransmit_resume > self.remote_last_seq {
+                self.remote_last_seq = self.fast_retransmit_resume;
+            }
+            self.fast_retransmit_gap_end = None;
+        }
         self.remote_last_ack = repr.ack_number;
         self.remote_last_win = repr.window_len;
 
@@ -6517,6 +6559,62 @@ mod test {
             s.local_rx_dup_acks, 0,
             "duplicate ACK counter is not reset when receiving a window update"
         );
+    }
+
+    #[test]
+    fn test_fast_retransmit_skips_sacked_tail() {
+        let mut s = socket_established();
+        s.remote_mss = 6;
+        s.send_slice(b"xxxxxxyyyyyywwwwwwzzzzzz").unwrap();
+
+        // Put four segments in flight. The first one will be reported lost,
+        // while the receiver SACKs the contiguous three-segment tail.
+        for (time, payload) in [
+            (1000, &b"xxxxxx"[..]),
+            (1005, &b"yyyyyy"[..]),
+            (1010, &b"wwwwww"[..]),
+            (1015, &b"zzzzzz"[..]),
+        ] {
+            recv!(s, time time, Ok(TcpRepr {
+                seq_number: LOCAL_SEQ + 1 + ((time - 1000) / 5 * 6) as usize,
+                ack_number: Some(REMOTE_SEQ + 1),
+                payload,
+                ..RECV_TEMPL
+            }));
+        }
+        let sent_high_water = s.remote_last_seq;
+        let sack_left = (LOCAL_SEQ + 1 + 6).0 as u32;
+        let sack_right = (LOCAL_SEQ + 1 + 24).0 as u32;
+
+        send!(s, TcpRepr {
+            seq_number: REMOTE_SEQ + 1,
+            ack_number: Some(LOCAL_SEQ + 1),
+            ..SEND_TEMPL
+        });
+
+        // Window changes must not hide genuine duplicate ACKs carrying SACK.
+        for window_len in [300, 301, 302] {
+            send!(s, TcpRepr {
+                seq_number: REMOTE_SEQ + 1,
+                ack_number: Some(LOCAL_SEQ + 1),
+                window_len,
+                sack_ranges: [Some((sack_left, sack_right)), None, None],
+                ..SEND_TEMPL
+            });
+        }
+        assert_eq!(s.timer, Timer::FastRetransmit);
+
+        // Only the six-byte hole is retransmitted. The send cursor then jumps
+        // over the SACKed tail instead of replaying it as go-back-N.
+        recv!(s, time 1020, Ok(TcpRepr {
+            seq_number: LOCAL_SEQ + 1,
+            ack_number: Some(REMOTE_SEQ + 1),
+            payload: &b"xxxxxx"[..],
+            ..RECV_TEMPL
+        }));
+        assert_eq!(s.remote_last_seq, sent_high_water);
+        assert_eq!(s.fast_retransmit_gap_end, None);
+        recv_nothing!(s, time 1020);
     }
 
     #[test]
