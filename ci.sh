@@ -14,6 +14,7 @@ RUSTC_VERSIONS=(
 
 FEATURES_TEST=(
     "default"
+    "default,socket-tcp-reno,socket-tcp-cubic"
     "std,proto-ipv4"
     "std,medium-ethernet,phy-raw_socket,proto-ipv6,socket-udp,socket-dns"
     "std,medium-ethernet,phy-tuntap_interface,proto-ipv6,socket-udp"
