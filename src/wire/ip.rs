@@ -770,37 +770,86 @@ pub mod checksum {
     }
 
     /// Compute an RFC 1071 compliant checksum (without the final complement).
+    #[allow(unsafe_code)]
     pub fn data(data: &[u8]) -> u16 {
-        // We calculate the sum in native-endian before converting to big-endian at the end
-        // see RFC 1071 section 2.(B) for details
+        // This is the same aligned native-endian scheme as lwIP's
+        // LWIP_CHKSUM_ALGORITHM=2. It turns the bulk path into one native u16
+        // load per Internet-checksum word. See RFC 1071 section 2(B).
         let mut accum: u32 = 0;
+        let mut bytes = data;
+        let odd = bytes.as_ptr().addr() & 1 != 0;
+        let mut edge_bytes = [0u8; 2];
 
-        // We manually unroll this hot loop.
-        // When optimizing for size (as is common for microcontrollers) the compiler will not unroll
-        // this. Manually unrolling allows us to do more work per loop tax (compare and branch).
-        // It does not seem to affect the auto-vectorization on bigger machines.
-        let (chunks, mut rem) = data.as_chunks::<4>();
-        for chunk in chunks {
-            let val_0 = u16::from_ne_bytes(chunk[..2].try_into().unwrap());
-            let val_1 = u16::from_ne_bytes(chunk[2..4].try_into().unwrap());
-            accum += val_0 as u32;
-            accum += val_1 as u32;
+        // Align the bulk slice. Byte positions here deliberately describe the
+        // native in-memory u16 representation, as in lwIP's implementation.
+        if odd && !bytes.is_empty() {
+            edge_bytes[1] = bytes[0];
+            bytes = &bytes[1..];
         }
 
-        // Handle 2 bytes of tail, if present.
-        if rem.len() >= 2 {
-            let val = u16::from_ne_bytes(rem[..2].try_into().unwrap());
-            accum += val as u32;
-            rem = &rem[2..];
+        // `bytes` now starts on a u16 boundary. Every u16 bit pattern is
+        // valid, and the derived slice stays within the original allocation.
+        let word_count = bytes.len() / 2;
+        let words = if word_count == 0 {
+            &[]
+        } else {
+            // SAFETY: an odd non-empty prefix was consumed above, so the
+            // pointer is u16-aligned. `word_count * 2 <= bytes.len()`, and
+            // every possible two-byte pattern is a valid u16.
+            unsafe { core::slice::from_raw_parts(bytes.as_ptr().cast::<u16>(), word_count) }
+        };
+        for &word in words {
+            accum += word as u32;
         }
 
-        // Add the last remaining odd byte, if any.
-        if let Some(&value) = rem.first() {
-            accum += u16::from_ne_bytes([value, 0]) as u32;
+        if bytes.len() & 1 != 0 {
+            edge_bytes[0] = bytes[word_count * 2];
+        }
+        accum += u16::from_ne_bytes(edge_bytes) as u32;
+
+        let mut collapsed = propagate_carries(accum);
+        collapsed = propagate_carries(collapsed as u32);
+        if odd {
+            collapsed = collapsed.swap_bytes();
+        }
+        collapsed.to_be()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::data;
+
+        fn reference(bytes: &[u8]) -> u16 {
+            let mut accum = 0u32;
+            let mut chunks = bytes.chunks_exact(2);
+            for chunk in &mut chunks {
+                accum += u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
+            }
+            if let Some(&last) = chunks.remainder().first() {
+                accum += (last as u32) << 8;
+            }
+            let sum = (accum >> 16) + (accum & 0xffff);
+            ((sum >> 16) + (sum & 0xffff)) as u16
         }
 
-        let collapsed = propagate_carries(accum);
-        u16::to_be(collapsed)
+        #[test]
+        fn aligned_native_words_match_reference() {
+            let mut storage = [0u8; 260];
+            for (index, byte) in storage.iter_mut().enumerate() {
+                *byte = (index as u8).wrapping_mul(37).wrapping_add(11);
+            }
+
+            for offset in 0..4 {
+                for length in 0..=255 {
+                    let bytes = &storage[offset..offset + length];
+                    assert_eq!(
+                        data(bytes),
+                        reference(bytes),
+                        "offset={offset} length={length}"
+                    );
+                }
+            }
+        }
     }
 
     /// Combine several RFC 1071 compliant checksums.
