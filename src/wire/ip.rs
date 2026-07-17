@@ -815,9 +815,90 @@ pub mod checksum {
         collapsed.to_be()
     }
 
+    /// Copy bytes while computing their RFC 1071 checksum.
+    ///
+    /// This is useful when a packet representation must copy a payload into a
+    /// device buffer and immediately checksum it. Combining both operations
+    /// avoids reading the destination payload a second time.
+    #[allow(unsafe_code)]
+    pub fn data_copy(source: &[u8], destination: &mut [u8]) -> u16 {
+        assert_eq!(source.len(), destination.len());
+
+        let mut accum = 0u32;
+        let mut source = source;
+        let mut destination = destination;
+        let odd = source.as_ptr().addr() & 1 != 0;
+        let mut edge_bytes = [0u8; 2];
+
+        if odd && !source.is_empty() {
+            edge_bytes[1] = source[0];
+            destination[0] = source[0];
+            source = &source[1..];
+            destination = &mut destination[1..];
+        }
+
+        let word_count = source.len() / 2;
+        let source_words = if word_count == 0 {
+            &[]
+        } else {
+            // SAFETY: an odd prefix was consumed above when necessary, so the
+            // pointer is u16-aligned. The slice stays within `source`, and all
+            // two-byte patterns are valid u16 values.
+            unsafe { core::slice::from_raw_parts(source.as_ptr().cast::<u16>(), word_count) }
+        };
+
+        if destination.as_ptr().addr() & 1 == 0 {
+            let destination_words = if word_count == 0 {
+                &mut []
+            } else {
+                // SAFETY: the destination pointer is u16-aligned and
+                // `word_count * 2 <= destination.len()`.
+                unsafe {
+                    core::slice::from_raw_parts_mut(
+                        destination.as_mut_ptr().cast::<u16>(),
+                        word_count,
+                    )
+                }
+            };
+            for (&source_word, destination_word) in
+                source_words.iter().zip(destination_words.iter_mut())
+            {
+                *destination_word = source_word;
+                accum += source_word as u32;
+            }
+        } else {
+            for (index, &source_word) in source_words.iter().enumerate() {
+                // SAFETY: two bytes starting at `index * 2` are within the
+                // destination. `write_unaligned` permits its odd address.
+                unsafe {
+                    destination
+                        .as_mut_ptr()
+                        .add(index * 2)
+                        .cast::<u16>()
+                        .write_unaligned(source_word);
+                }
+                accum += source_word as u32;
+            }
+        }
+
+        if source.len() & 1 != 0 {
+            let last = source[word_count * 2];
+            destination[word_count * 2] = last;
+            edge_bytes[0] = last;
+        }
+        accum += u16::from_ne_bytes(edge_bytes) as u32;
+
+        let mut collapsed = propagate_carries(accum);
+        collapsed = propagate_carries(collapsed as u32);
+        if odd {
+            collapsed = collapsed.swap_bytes();
+        }
+        collapsed.to_be()
+    }
+
     #[cfg(test)]
     mod tests {
-        use super::data;
+        use super::{data, data_copy};
 
         fn reference(bytes: &[u8]) -> u16 {
             let mut accum = 0u32;
@@ -847,6 +928,32 @@ pub mod checksum {
                         reference(bytes),
                         "offset={offset} length={length}"
                     );
+                }
+            }
+        }
+
+        #[test]
+        fn copy_matches_reference_for_all_alignments() {
+            let mut source_storage = [0u8; 260];
+            for (index, byte) in source_storage.iter_mut().enumerate() {
+                *byte = (index as u8).wrapping_mul(53).wrapping_add(7);
+            }
+
+            for source_offset in 0..4 {
+                for destination_offset in 0..4 {
+                    for length in 0..=255 {
+                        let source = &source_storage[source_offset..source_offset + length];
+                        let mut destination_storage = [0xa5u8; 260];
+                        let destination = &mut destination_storage
+                            [destination_offset..destination_offset + length];
+                        let checksum = data_copy(source, destination);
+                        assert_eq!(destination, source);
+                        assert_eq!(
+                            checksum,
+                            reference(source),
+                            "source_offset={source_offset} destination_offset={destination_offset} length={length}"
+                        );
+                    }
                 }
             }
         }

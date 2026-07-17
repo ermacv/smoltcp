@@ -1050,11 +1050,24 @@ impl<'a> Repr<'a> {
             }
         }
         packet.set_urgent_at(0);
-        packet.payload_mut()[..self.payload.len()].copy_from_slice(self.payload);
 
         if checksum_caps.tcp.tx() {
-            packet.fill_checksum(src_addr, dst_addr)
+            packet.set_checksum(0);
+            let payload_checksum = checksum::data_copy(
+                self.payload,
+                &mut packet.payload_mut()[..self.payload.len()],
+            );
+            let checksum = {
+                let data = packet.as_ref();
+                !checksum::combine(&[
+                    checksum::pseudo_header(src_addr, dst_addr, IpProtocol::Tcp, data.len() as u32),
+                    checksum::data(&data[..self.header_len()]),
+                    payload_checksum,
+                ])
+            };
+            packet.set_checksum(checksum)
         } else {
+            packet.payload_mut()[..self.payload.len()].copy_from_slice(self.payload);
             // make sure we get a consistently zeroed checksum,
             // since implementations might rely on it
             packet.set_checksum(0);
@@ -1334,6 +1347,40 @@ mod test {
             &ChecksumCapabilities::default(),
         );
         assert_eq!(&*packet.into_inner(), &SYN_PACKET_BYTES[..]);
+    }
+
+    #[test]
+    #[cfg(feature = "proto-ipv4")]
+    fn test_emit_payload_lengths_and_alignments() {
+        let mut payload_storage = [0u8; 260];
+        for (index, byte) in payload_storage.iter_mut().enumerate() {
+            *byte = (index as u8).wrapping_mul(29).wrapping_add(3);
+        }
+
+        for payload_offset in 0..4 {
+            for packet_offset in 0..4 {
+                for payload_len in 0..=255 {
+                    let payload = &payload_storage[payload_offset..payload_offset + payload_len];
+                    let mut repr = packet_repr();
+                    repr.payload = payload;
+                    let mut packet_storage = [0xa5u8; 280];
+                    let packet_bytes =
+                        &mut packet_storage[packet_offset..packet_offset + repr.buffer_len()];
+                    let mut packet = Packet::new_unchecked(packet_bytes);
+                    repr.emit(
+                        &mut packet,
+                        &SRC_ADDR.into(),
+                        &DST_ADDR.into(),
+                        &ChecksumCapabilities::default(),
+                    );
+                    assert_eq!(&packet.as_ref()[repr.header_len()..], payload);
+                    assert!(
+                        packet.verify_checksum(&SRC_ADDR.into(), &DST_ADDR.into()),
+                        "payload_offset={payload_offset} packet_offset={packet_offset} payload_len={payload_len}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
