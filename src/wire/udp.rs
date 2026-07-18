@@ -191,6 +191,14 @@ impl<T: AsRef<[u8]> + AsMut<[u8]>> Packet<T> {
     /// # Panics
     /// This function panics unless `src_addr` and `dst_addr` belong to the same family,
     /// and that family is IPv4 or IPv6.
+    // SAFETY: this only classifies an executable input section; the final
+    // firmware linker script is responsible for mapping it to executable RAM.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-emit",
+        unsafe(link_section = ".hot.text.net.emit")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-emit", inline(never))]
     pub fn fill_checksum(&mut self, src_addr: &IpAddress, dst_addr: &IpAddress) {
         self.set_checksum(0);
         let checksum = {

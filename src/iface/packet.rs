@@ -70,6 +70,14 @@ impl<'p> Packet<'p> {
         }
     }
 
+    // SAFETY: this only classifies an executable input section; the final
+    // firmware linker script is responsible for mapping it to executable RAM.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-emit",
+        unsafe(link_section = ".hot.text.net.emit")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-emit", inline(never))]
     pub(crate) fn emit_payload(
         &self,
         _ip_repr: &IpRepr,

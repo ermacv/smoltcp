@@ -45,6 +45,14 @@ impl InterfaceInner {
         }
     }
 
+    // SAFETY: this only classifies an executable input section; the final
+    // firmware linker script is responsible for mapping it to executable RAM.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-egress",
+        unsafe(link_section = ".hot.text.net.egress")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-egress", inline(never))]
     pub(super) fn dispatch_ethernet<Tx, F>(
         &mut self,
         tx_token: Tx,

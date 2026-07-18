@@ -770,7 +770,14 @@ pub mod checksum {
     }
 
     /// Compute an RFC 1071 compliant checksum (without the final complement).
+    // SAFETY: this only classifies an executable input section; the final
+    // firmware linker script is responsible for mapping it to executable RAM.
     #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-emit",
+        unsafe(link_section = ".hot.text.net.emit")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-emit", inline(never))]
     pub fn data(data: &[u8]) -> u16 {
         // This is the same aligned native-endian scheme as lwIP's
         // LWIP_CHKSUM_ALGORITHM=2. It turns the bulk path into one native u16
@@ -969,6 +976,13 @@ pub mod checksum {
     }
 
     #[cfg(feature = "proto-ipv4")]
+    // SAFETY: see `data`; this uses the same semantic code-placement contract.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-emit",
+        unsafe(link_section = ".hot.text.net.emit")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-emit", inline(never))]
     pub fn pseudo_header_v4(
         src_addr: &Ipv4Address,
         dst_addr: &Ipv4Address,
@@ -987,6 +1001,13 @@ pub mod checksum {
     }
 
     #[cfg(feature = "proto-ipv6")]
+    // SAFETY: see `data`; this uses the same semantic code-placement contract.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-emit",
+        unsafe(link_section = ".hot.text.net.emit")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-emit", inline(never))]
     pub fn pseudo_header_v6(
         src_addr: &Ipv6Address,
         dst_addr: &Ipv6Address,
@@ -1004,6 +1025,13 @@ pub mod checksum {
         ])
     }
 
+    // SAFETY: see `data`; this uses the same semantic code-placement contract.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-emit",
+        unsafe(link_section = ".hot.text.net.emit")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-emit", inline(never))]
     pub fn pseudo_header(
         src_addr: &Address,
         dst_addr: &Address,

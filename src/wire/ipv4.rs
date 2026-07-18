@@ -581,6 +581,14 @@ impl Repr {
     }
 
     /// Emit a high-level representation into an Internet Protocol version 4 packet.
+    // SAFETY: this only classifies an executable input section; the final
+    // firmware linker script is responsible for mapping it to executable RAM.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-emit",
+        unsafe(link_section = ".hot.text.net.emit")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-emit", inline(never))]
     pub fn emit<T: AsRef<[u8]> + AsMut<[u8]>>(
         &self,
         packet: &mut Packet<T>,

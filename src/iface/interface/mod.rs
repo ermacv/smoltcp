@@ -503,6 +503,14 @@ impl Interface {
     /// might have changed.
     ///
     /// This is guaranteed to always perform a bounded amount of work.
+    // SAFETY: this only classifies an executable input section; the final
+    // firmware linker script is responsible for mapping it to executable RAM.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-egress",
+        unsafe(link_section = ".hot.text.net.egress")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-egress", inline(never))]
     pub fn poll_egress(
         &mut self,
         timestamp: Instant,
@@ -697,6 +705,14 @@ impl Interface {
         })
     }
 
+    // SAFETY: see `poll_egress`; this is the same semantic code-placement
+    // contract for the rest of the measured egress path.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-egress",
+        unsafe(link_section = ".hot.text.net.egress")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-egress", inline(never))]
     fn socket_egress(
         &mut self,
         device: &mut (impl Device + ?Sized),
@@ -1190,6 +1206,14 @@ impl InterfaceInner {
         self.neighbor_cache.flush()
     }
 
+    // SAFETY: see `poll_egress`; this is the same semantic code-placement
+    // contract for the rest of the measured egress path.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-egress",
+        unsafe(link_section = ".hot.text.net.egress")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-egress", inline(never))]
     fn dispatch_ip<Tx: TxToken>(
         &mut self,
         // NOTE(unused_mut): tx_token isn't always mutated, depending on
