@@ -7,6 +7,15 @@ use crate::socket::dns::Socket as DnsSocket;
 use crate::socket::udp::Socket as UdpSocket;
 
 impl InterfaceInner {
+    // Keep the common UDP data-plane path independently placeable. The caller
+    // still validates Ethernet/IPv4 and this function still validates UDP; the
+    // section only controls executable-code placement.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-ingress",
+        unsafe(link_section = ".hot.text.net.ingress")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-ingress", inline(never))]
     pub(super) fn process_udp<'frame>(
         &mut self,
         sockets: &mut SocketSet,

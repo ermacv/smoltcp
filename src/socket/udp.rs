@@ -492,6 +492,15 @@ impl<'a> Socket<'a> {
         true
     }
 
+    // Terminal UDP ingress operation: enqueue metadata and the validated
+    // payload, then wake the consumer. Separating placement does not change
+    // ownership, checksums, or overflow behavior.
+    #[allow(unsafe_code)]
+    #[cfg_attr(
+        feature = "_perf-hotpath-ingress",
+        unsafe(link_section = ".hot.text.net.ingress")
+    )]
+    #[cfg_attr(feature = "_perf-hotpath-ingress", inline(never))]
     pub(crate) fn process(
         &mut self,
         cx: &mut Context,
